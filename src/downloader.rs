@@ -38,10 +38,28 @@ pub struct DownloadManager {
 }
 
 fn yt_dlp_cmd() -> Command {
-    if Path::new("yt-dlp.exe").exists() {
+    let mut cmd = if Path::new("yt-dlp.exe").exists() {
         Command::new(".\\yt-dlp.exe")
     } else {
         Command::new("yt-dlp")
+    };
+    // Make yt-dlp print UTF-8 so titles and error messages are not garbled on Windows.
+    cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
+    cmd
+}
+
+/// yt-dlp arguments for the cookie source chosen in the settings.
+fn cookie_args(source: &str) -> Result<Vec<String>, String> {
+    match source {
+        "Off" => Ok(Vec::new()),
+        "cookies.txt" => {
+            if Path::new("cookies.txt").exists() {
+                Ok(vec!["--cookies".to_string(), "cookies.txt".to_string()])
+            } else {
+                Err("cookies.txt not found next to the program".to_string())
+            }
+        }
+        browser => Ok(vec!["--cookies-from-browser".to_string(), browser.to_lowercase()]),
     }
 }
 
@@ -57,6 +75,19 @@ fn clean_error(line: &str) -> String {
                 }
             }
         }
+    }
+    let lower = s.to_lowercase();
+    if lower.contains("not a bot") {
+        return "Bot check: set Cookies in Settings (F7), or update yt-dlp (F8)".to_string();
+    }
+    if lower.contains("confirm your age") {
+        return "Age-restricted: set Cookies in Settings (F7)".to_string();
+    }
+    if lower.contains("could not copy") && lower.contains("cookie") {
+        return "Browser cookies locked: close the browser, or use Firefox / cookies.txt".to_string();
+    }
+    if lower.contains("dpapi") {
+        return "Browser cookies unreadable: try Firefox or cookies.txt".to_string();
     }
     s.to_string()
 }
@@ -86,8 +117,9 @@ fn playlist_id(url: &str) -> Option<String> {
     None
 }
 
-async fn fetch_playlist(url: &str) -> Result<Vec<String>, String> {
+async fn fetch_playlist(url: &str, cookies: &[String]) -> Result<Vec<String>, String> {
     let output = yt_dlp_cmd()
+        .args(cookies)
         .arg("--flat-playlist")
         .arg("--yes-playlist")
         .arg("--print")
@@ -303,7 +335,15 @@ impl DownloadManager {
         let tx = self.expand_tx.clone();
         let handle = tokio::spawn(async move {
             notify(&state, &ui_tx, "Fetching playlist…", true, None).await;
-            match fetch_playlist(&url).await {
+            let source = { state.lock().await.settings.cookies.clone() };
+            let cookies = match cookie_args(&source) {
+                Ok(a) => a,
+                Err(e) => {
+                    notify(&state, &ui_tx, format!("Playlist failed: {}", e), false, Some(6000)).await;
+                    return;
+                }
+            };
+            match fetch_playlist(&url, &cookies).await {
                 Ok(urls) => {
                     let n = urls.len();
                     let _ = tx.send(urls);
@@ -416,6 +456,21 @@ async fn process_job(job: DownloadJob, state: &Arc<Mutex<AppState>>, ui_tx: &mps
     // Snapshot the settings so a change mid-download doesn't affect this job.
     let settings = { state.lock().await.settings.clone() };
 
+    let cookies = match cookie_args(&settings.cookies) {
+        Ok(a) => a,
+        Err(reason) => {
+            {
+                let mut s = state.lock().await;
+                if let Some(item) = s.downloads.get_mut(index) {
+                    item.status = DownloadStatus::Error(reason);
+                    s.is_dirty = true;
+                }
+            }
+            let _ = ui_tx.send(()).await;
+            return;
+        }
+    };
+
     // Phase 1: mark Loading & fetch title
     {
         let mut s = state.lock().await;
@@ -430,7 +485,8 @@ async fn process_job(job: DownloadJob, state: &Arc<Mutex<AppState>>, ui_tx: &mps
     let _ = ui_tx.send(()).await;
 
     let mut cmd = yt_dlp_cmd();
-    cmd.arg("--no-playlist")
+    cmd.args(&cookies)
+        .arg("--no-playlist")
         .arg("--print")
         .arg("title")
         .arg(&url)
@@ -488,7 +544,7 @@ async fn process_job(job: DownloadJob, state: &Arc<Mutex<AppState>>, ui_tx: &mps
     // Phase 2: actual download
     let out_tmpl = output_dir.join("%(title)s.%(ext)s");
     let mut dl_cmd = yt_dlp_cmd();
-    dl_cmd.arg("--no-playlist");
+    dl_cmd.args(&cookies).arg("--no-playlist");
     if mode == Mode::Audio {
         dl_cmd.arg("-x").arg("--audio-format").arg(&settings.audio_format);
         if matches!(settings.audio_format.as_str(), "mp3" | "m4a" | "opus") {
