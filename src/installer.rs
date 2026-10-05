@@ -23,16 +23,10 @@ async fn download_file(url: &str, dest: &str, state: Arc<Mutex<AppState>>, tx: m
         
         if total_size > 0 {
             let progress = (downloaded as f64 / total_size as f64) * 100.0;
-            
-            // FIX: We put the lock inside its own scope {} so it drops immediately
-            {
-                let mut s = state.lock().await;
-                s.install_progress = progress as f32;
-                s.is_dirty = true;
-            } 
-            
-            // FIX: Use try_send() instead of send().await so it never blocks if the queue is full
-            let _ = tx.try_send(());
+            let mut s = state.lock().await;
+            s.install_progress = progress as f32;
+            s.is_dirty = true;
+            let _ = tx.send(()).await;
         }
     }
     Ok(())
@@ -75,10 +69,5 @@ pub async fn check_and_install(state: Arc<Mutex<AppState>>, tx: mpsc::Sender<()>
         }
     }
     
-    {
-        let mut s = state.lock().await;
-        s.screen = AppScreen::Main;
-        s.is_dirty = true;
-    }
-    let _ = tx.send(()).await;
+    crate::updater::finish_loading(state, tx).await;
 }
