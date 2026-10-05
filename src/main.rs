@@ -2,6 +2,7 @@ mod downloader;
 mod installer;
 mod settings;
 mod ui;
+mod updater;
 
 use crossterm::{
     event::{
@@ -12,9 +13,6 @@ use crossterm::{
     ExecutableCommand,
 };
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::ptr::null_mut;
 use std::sync::Arc;
 use std::{
     io::{self, stdout},
@@ -22,11 +20,6 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use winapi::um::wincon::GetConsoleWindow;
-use winapi::um::winuser::{
-    LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON,
-    LR_DEFAULTSIZE, LR_LOADFROMFILE, WM_SETICON,
-};
 
 use crate::downloader::DownloadManager;
 use crate::settings::{Settings, ROW_COUNT};
@@ -42,6 +35,8 @@ pub enum AppScreen {
     Installing,
     Main,
     Settings,
+    UpdatePrompt,
+    Updating,
 }
 
 #[derive(Clone)]
@@ -70,14 +65,27 @@ pub struct AppState {
     pub is_dirty: bool,
     pub scroll_offset: usize,
     pub output_path: std::path::PathBuf,
+    /// When true downloads run in parallel (limits come from the settings).
     pub fast_mode: bool,
+    /// Current frame of the braille spinner animation.
     pub spinner_frame: usize,
+    /// User-adjustable settings (saved to settings.json).
     pub settings: Settings,
+    /// Selected row on the settings screen.
     pub settings_cursor: usize,
+    /// One-line message shown under the summary line.
     pub notice: Option<String>,
+    /// True while the notice describes a running task (shows a spinner).
     pub notice_busy: bool,
+    /// New release found on GitHub (used by the update screens).
+    pub pending_update: Option<updater::Release>,
+    /// Replaces the progress text on the loading / updating screen.
+    pub loading_text: Option<String>,
+    /// Set to leave the main loop (for example after an update).
+    pub quit: bool,
 }
 
+/// Show a message on the notice row. With `ttl_ms` it disappears by itself.
 pub async fn notify(
     state: &Arc<Mutex<AppState>>,
     tx: &mpsc::Sender<()>,
@@ -117,42 +125,16 @@ pub async fn notify(
     }
 }
 
-fn set_console_icon(icon_path: &str) {
-    unsafe {
-        let hwnd = GetConsoleWindow();
-        if hwnd.is_null() {
-            return;
-        }
-
-        let path_wide: Vec<u16> = OsStr::new(icon_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let hicon = LoadImageW(
-            null_mut(),
-            path_wide.as_ptr(),
-            IMAGE_ICON,
-            0,
-            0,
-            LR_LOADFROMFILE | LR_DEFAULTSIZE,
-        );
-
-        if !hicon.is_null() {
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, hicon as isize);
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, hicon as isize);
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    set_console_icon("app_icon.ico");
+    // Delete files left over from the last update.
+    updater::cleanup();
 
     enable_raw_mode()?;
     let mut out = stdout();
     out.execute(EnterAlternateScreen)?;
     out.execute(SetTitle("Celestial"))?;
+    // Enable keyboard enhancement so we can detect modifier keys (Alt, etc.) as standalone events.
     let _ = out.execute(PushKeyboardEnhancementFlags(
         KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
     ));
@@ -168,6 +150,7 @@ async fn main() -> io::Result<()> {
         .map(|p| format!("{}\\Downloads", p))
         .unwrap_or_else(|_| ".".to_string());
 
+    // Restore settings, mode, fast mode and output folder from the last session.
     let saved = settings::load();
     let output_path = saved
         .output_path
@@ -178,7 +161,7 @@ async fn main() -> io::Result<()> {
 
     let state = Arc::new(Mutex::new(AppState {
         screen: AppScreen::Installing,
-        install_progress: -1.0,
+        install_progress: 0.0,
         mode: saved.mode,
         input_buffer: String::new(),
         downloads: Vec::new(),
@@ -191,6 +174,9 @@ async fn main() -> io::Result<()> {
         settings_cursor: 0,
         notice: None,
         notice_busy: false,
+        pending_update: None,
+        loading_text: None,
+        quit: false,
     }));
 
     let (tx, mut rx) = mpsc::channel(100);
@@ -201,16 +187,18 @@ async fn main() -> io::Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
+        // Videos found by playlist lookups join the queue here.
         manager.poll_expanded().await;
 
         let mut should_draw = false;
         {
             let mut state_guard = state.lock().await;
 
+            // Advance the spinner every 80 ms while something is loading/downloading.
             if last_tick.elapsed() >= Duration::from_millis(80) {
                 let animating = match state_guard.screen {
-                    AppScreen::Installing => true,
-                    AppScreen::Settings => false,
+                    AppScreen::Installing | AppScreen::Updating => true,
+                    AppScreen::Settings | AppScreen::UpdatePrompt => false,
                     AppScreen::Main => {
                         state_guard.notice_busy
                             || state_guard.downloads.iter().any(|d| {
@@ -236,6 +224,10 @@ async fn main() -> io::Result<()> {
             ui::draw(&state_guard)?;
         }
 
+        if state.lock().await.quit {
+            break;
+        }
+
         while let Ok(_) = rx.try_recv() {}
 
         if event::poll(Duration::from_millis(30))? {
@@ -258,6 +250,34 @@ async fn main() -> io::Result<()> {
                     continue;
                 }
 
+                // ── Update screens ──────────────────────────────────────────
+                if screen == AppScreen::Updating {
+                    continue;
+                }
+                if screen == AppScreen::UpdatePrompt {
+                    match key.code {
+                        KeyCode::Char('u') | KeyCode::Char('U') => {
+                            let release = { state.lock().await.pending_update.clone() };
+                            if let Some(release) = release {
+                                tokio::spawn(updater::apply(state.clone(), tx.clone(), release));
+                            }
+                        }
+                        KeyCode::Enter
+                        | KeyCode::Esc
+                        | KeyCode::Char('n')
+                        | KeyCode::Char('N')
+                        | KeyCode::Char(' ') => {
+                            let mut s = state.lock().await;
+                            s.screen = AppScreen::Main;
+                            s.pending_update = None;
+                            s.is_dirty = true;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Settings screen ─────────────────────────────────────────
                 if screen == AppScreen::Settings {
                     let mut limits_changed = false;
                     {
@@ -303,6 +323,7 @@ async fn main() -> io::Result<()> {
                     continue;
                 }
 
+                // ── Main screen ─────────────────────────────────────────────
                 match key.code {
                     KeyCode::Esc => {
                         manager.cancel_all().await;
@@ -339,18 +360,57 @@ async fn main() -> io::Result<()> {
                                 s.notice_busy,
                             )
                         };
-                        if !updating {
-                            if has_active {
-                                notify(&state, &tx, "Stop active downloads before updating yt-dlp", false, Some(4000)).await;
-                            } else {
-                                let state_clone = state.clone();
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    notify(&state_clone, &tx_clone, "Updating yt-dlp…", true, None).await;
-                                    let msg = downloader::update_yt_dlp().await;
-                                    notify(&state_clone, &tx_clone, msg, false, Some(8000)).await;
-                                });
-                            }
+                        if updating {
+                            // A lookup or update is already running.
+                        } else if has_active {
+                            notify(&state, &tx, "Stop active downloads before updating yt-dlp", false, Some(4000)).await;
+                        } else {
+                            let state_clone = state.clone();
+                            let tx_clone = tx.clone();
+                            tokio::spawn(async move {
+                                notify(&state_clone, &tx_clone, "Updating yt-dlp…", true, None).await;
+                                let msg = downloader::update_yt_dlp().await;
+                                notify(&state_clone, &tx_clone, msg, false, Some(8000)).await;
+                            });
+                        }
+                    }
+                    KeyCode::F(9) => {
+                        let (has_active, busy) = {
+                            let s = state.lock().await;
+                            (
+                                s.downloads.iter().any(|d| {
+                                    matches!(d.status, DownloadStatus::Loading | DownloadStatus::Downloading(_))
+                                }),
+                                s.notice_busy,
+                            )
+                        };
+                        if busy {
+                            // A lookup or update is already running.
+                        } else if has_active {
+                            notify(&state, &tx, "Stop active downloads before updating Celestial", false, Some(4000)).await;
+                        } else {
+                            let state_clone = state.clone();
+                            let tx_clone = tx.clone();
+                            tokio::spawn(async move {
+                                notify(&state_clone, &tx_clone, "Checking for updates…", true, None).await;
+                                match updater::check().await {
+                                    Ok(Some(release)) => {
+                                        {
+                                            let mut s = state_clone.lock().await;
+                                            s.notice = None;
+                                            s.notice_busy = false;
+                                        }
+                                        updater::apply(state_clone, tx_clone, release).await;
+                                    }
+                                    Ok(None) => {
+                                        let msg = format!("Celestial is up to date (v{})", updater::CURRENT);
+                                        notify(&state_clone, &tx_clone, msg, false, Some(6000)).await;
+                                    }
+                                    Err(e) => {
+                                        notify(&state_clone, &tx_clone, format!("Update check failed: {}", e), false, Some(8000)).await;
+                                    }
+                                }
+                            });
                         }
                     }
                     KeyCode::Up => {
@@ -373,6 +433,7 @@ async fn main() -> io::Result<()> {
                         let tx_clone = tx.clone();
                         let state_clone = state.clone();
                         tokio::spawn(async move {
+                            // -STA is required for AutoUpgradeEnabled to show the modern Windows Explorer picker.
                             let ps_script = r#"Add-Type -AssemblyName System.windows.forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.AutoUpgradeEnabled = $true; $f.ShowNewFolderButton = $true; if ($f.ShowDialog() -eq 'OK') { Write-Output $f.SelectedPath }"#;
                             let output = tokio::process::Command::new("powershell")
                                 .args(&["-NoProfile", "-STA", "-Command", ps_script])
