@@ -23,7 +23,10 @@ pub const ACCENTS: [(&str, (u8, u8, u8)); 8] = [
     ("Light Red", (255, 130, 130)),
 ];
 
-pub const ROW_COUNT: usize = 8;
+/// Where yt-dlp gets YouTube login cookies from ("Off" = none).
+pub const COOKIE_SOURCES: [&str; 6] = ["Off", "Firefox", "Chrome", "Edge", "Brave", "cookies.txt"];
+
+pub const ROW_COUNT: usize = 10;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +39,8 @@ pub struct Settings {
     pub fast_audio_slots: usize,
     pub fast_video_slots: usize,
     pub accent: String,
+    pub cookies: String,
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +54,8 @@ impl Default for Settings {
             fast_audio_slots: 30,
             fast_video_slots: 15,
             accent: ACCENTS[0].0.to_string(),
+            cookies: "Off".to_string(),
+            auto_update: false,
         }
     }
 }
@@ -72,6 +79,9 @@ impl Settings {
         }
         if !ACCENTS.iter().any(|(name, _)| *name == self.accent) {
             self.accent = ACCENTS[0].0.to_string();
+        }
+        if !COOKIE_SOURCES.contains(&self.cookies.as_str()) {
+            self.cookies = "Off".to_string();
         }
         self.fast_audio_slots = self.fast_audio_slots.clamp(1, 100);
         self.fast_video_slots = self.fast_video_slots.clamp(1, 100);
@@ -108,13 +118,21 @@ impl Settings {
             4 => self.expand_playlists = !self.expand_playlists,
             5 => {
                 let i = cycle(
+                    COOKIE_SOURCES.len(),
+                    COOKIE_SOURCES.iter().position(|c| *c == self.cookies),
+                    dir,
+                );
+                self.cookies = COOKIE_SOURCES[i].to_string();
+            }
+            6 => {
+                let i = cycle(
                     PARALLEL_STEPS.len(),
                     PARALLEL_STEPS.iter().position(|n| *n == self.fast_audio_slots),
                     dir,
                 );
                 self.fast_audio_slots = PARALLEL_STEPS[i];
             }
-            6 => {
+            7 => {
                 let i = cycle(
                     PARALLEL_STEPS.len(),
                     PARALLEL_STEPS.iter().position(|n| *n == self.fast_video_slots),
@@ -122,7 +140,7 @@ impl Settings {
                 );
                 self.fast_video_slots = PARALLEL_STEPS[i];
             }
-            7 => {
+            8 => {
                 let i = cycle(
                     ACCENTS.len(),
                     ACCENTS.iter().position(|(name, _)| *name == self.accent),
@@ -130,6 +148,7 @@ impl Settings {
                 );
                 self.accent = ACCENTS[i].0.to_string();
             }
+            9 => self.auto_update = !self.auto_update,
             _ => {}
         }
     }
@@ -164,9 +183,15 @@ impl Settings {
                 if self.expand_playlists { "Expand all".to_string() } else { "Single video".to_string() },
                 "What to do with playlist URLs",
             ),
+            ("Cookies", self.cookies.clone(), "Fixes bot check, age and login errors"),
             ("Parallel audio", self.fast_audio_slots.to_string(), "Fast DL limit for audio"),
             ("Parallel video", self.fast_video_slots.to_string(), "Fast DL limit for video"),
             ("Accent color", self.accent.clone(), "Highlight color of the interface"),
+            (
+                "Auto update",
+                if self.auto_update { "On".to_string() } else { "Off".to_string() },
+                "Install new versions on startup",
+            ),
         ]
     }
 }
