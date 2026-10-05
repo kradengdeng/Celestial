@@ -40,6 +40,7 @@ Built in Rust. Powered by `yt-dlp`. Zero setup.
 | **Settings menu** | Change quality, formats, limits and the accent color inside the app. Saved automatically. |
 | **Clipboard paste** | `Ctrl+V` pastes one link, or queues several links at once. |
 | **yt-dlp updater** | Press `F8` to update `yt-dlp` without leaving the app. |
+| **Self-update** | Press `F9` to update Celestial from the latest GitHub release. A notice appears at startup when a new version exists, and you choose whether to update. |
 | **Folder picker** | Press `Tab` to choose the output folder in Windows Explorer. |
 | **Instant cancel** | Stop everything with `Space`. |
 
@@ -70,8 +71,8 @@ Run `install-and-run.bat`. It installs Rust if needed, builds the project, and s
 Requires the [Rust toolchain](https://www.rust-lang.org/tools/install).
 
 ```powershell
-git clone https://github.com/kradengdeng/Celestial.git
-cd Celestial
+git clone https://github.com/<your-username>/<your-repo>.git
+cd <your-repo>
 cargo run --release
 ```
 
@@ -89,6 +90,7 @@ cargo run --release
 | `F6` | Toggle Fast DL (parallel downloads) |
 | `F7` | Open the settings menu |
 | `F8` | Update `yt-dlp` |
+| `F9` | Update Celestial from GitHub |
 | `Tab` | Choose the output folder |
 | `Space` | Cancel all active downloads |
 | `Up` / `Down` | Scroll the download list |
@@ -113,11 +115,37 @@ cargo run --release
 | Video quality | Best, 1080p, 720p, 480p, 360p (maximum) | Best |
 | Cover art & tags | Off, On (embeds thumbnail and metadata) | Off |
 | Playlist links | Expand all, Single video | Expand all |
+| Cookies | Off, Firefox, Chrome, Edge, Brave, cookies.txt | Off |
 | Parallel audio | 1, 2, 3, 5, 8, 10, 15, 20, 30 | 30 |
 | Parallel video | 1, 2, 3, 5, 8, 10, 15, 20, 30 | 15 |
 | Accent color | Light Purple, Blue, Cyan, Green, Yellow, Orange, Pink, Red | Light Purple |
+| Auto update | Off, On (installs new versions on startup without asking) | Off |
 
 Settings, the selected mode, Fast DL state and output folder are saved to `settings.json` next to the program. Delete the file to reset everything.
+
+---
+
+## Troubleshooting
+
+### "Sign in to confirm you're not a bot"
+
+YouTube sometimes blocks downloads that don't look like a logged-in browser.
+
+1. Press `F8` to update `yt-dlp`.
+2. Press `F7`, select **Cookies**, and choose the browser where you are signed in to YouTube. Firefox is the most reliable.
+3. If the browser option fails (Chrome and Edge cookies can be locked or encrypted), export your cookies to a `cookies.txt` file, put it next to the program, and choose **cookies.txt**.
+
+Keep `cookies.txt` private. It gives access to your logged-in session.
+
+---
+
+## Updating
+
+- **Startup notice:** after loading, Celestial checks GitHub for a newer release. If one exists, you see a notice: press `U` to update now, or `Enter` to continue. Updating is never forced.
+- **Manual update:** press `F9` on the main screen at any time.
+- **Auto update:** turn it on in the settings to install new versions at startup without asking.
+
+The update replaces `Celestial.exe` with the `.exe` attached to the latest [release](../../releases/latest) and restarts the app in a new window. Your `settings.json` is kept.
 
 ---
 
@@ -178,6 +206,7 @@ src/
   downloader.rs   Queue, parallel jobs, playlists, yt-dlp calls
   installer.rs    First-run download of yt-dlp and ffmpeg
   settings.rs     Settings model and settings.json storage
+  updater.rs      Update check and self-update from GitHub releases
 ```
 
 ---
