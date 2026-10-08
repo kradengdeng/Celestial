@@ -11,7 +11,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)
 
-![Celestial screenshot](docs/screenshot.png)
+![Celestial screenshot](picture/screenshot.png)
 
 [Download](https://github.com/kradengdeng/Celestial/releases/latest) | [Controls](#controls) | [Settings](#settings) | [Build from source](#build-from-source) | [Patch notes](PATCH_NOTES.md)
 
